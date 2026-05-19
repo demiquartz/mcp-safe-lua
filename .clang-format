@@ -1,0 +1,32 @@
+AccessModifierOffset: -4
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerIndentWidth: 4
+
+AllowShortFunctionsOnASingleLine: None
+
+BreakAfterAttributes: Always
+BreakTemplateDeclarations: Yes
+
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  BeforeCatch: true
+  BeforeElse: true
+
+IndentWidth: 4
+UseTab: Never
+
+ColumnLimit: 120
+PointerAlignment: Left
+
+SortIncludes: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '<[^.]*>'
+    Priority: -4
+  - Regex: '<boost/.*>'
+    Priority: -3
+  - Regex: '<.*>'
+    Priority: -2
+  - Regex: '.*'
+    Priority: -1

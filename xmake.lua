@@ -1,0 +1,23 @@
+set_xmakever("3.0.0")
+
+local project = "mcp-safe-lua"
+local version = "0.0.0"
+local license = "Apache-2.0"
+set_project(project)
+set_version(version)
+set_license(license)
+
+add_rules("mode.debug", "mode.release")
+set_languages("c++23")
+set_warnings("all", "extra", "pedantic")
+
+add_requires("glaze 7.0.x", "lua 5.5.x")
+
+target(project)
+    set_kind("binary")
+    add_files("src/main.cpp")
+    add_packages("glaze", "lua")
+    set_configvar("project", project)
+    set_configvar("version", version)
+    add_configfiles("src/config.hpp.in")
+    add_includedirs("$(builddir)")
