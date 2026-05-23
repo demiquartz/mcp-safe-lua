@@ -1,7 +1,7 @@
-set_xmakever("3.0.0")
+set_xmakever("2.8.3")
 
 local project = "mcp-safe-lua"
-local version = "0.0.0"
+local version = "0.1.0"
 local license = "Apache-2.0"
 set_project(project)
 set_version(version)

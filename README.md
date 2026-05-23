@@ -180,7 +180,6 @@ The server returns the execution logs in `output` and the return value in `resul
 
 ## 🗺️ Roadmap / TODO
 - [ ] Support configurable resource limits (memory, timeout, output) via command-line arguments.
-- [ ] Provide pre-compiled binaries via GitHub Releases.
 
 ## 📄 License
 
