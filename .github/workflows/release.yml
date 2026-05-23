@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup clang
+        uses: egor-tensin/setup-clang@v2
+        with:
+          version: '22'
+          platform: x64
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+          package-cache: true
+          package-cache-key: ${{ matrix.os }}-package-${{ hashFiles('xmake.lua') }}
+          build-cache: true
+          build-cache-key: ${{ matrix.os }}-build-${{ hashFiles('xmake.lua') }}
+      - name: Configure
+        run: xmake config --yes --toolchain=clang
+      - name: Build
+        run: xmake build --yes
+      - name: Install
+        run: xmake install --yes --installdir=./dist
+      - name: Package for linux
+        if: matrix.os == 'ubuntu-latest'
+        run: tar --create --xz --file ${{ github.event.repository.name }}-linux.tar.xz --directory ./dist .
+      - name: Package for windows
+        if: matrix.os == 'windows-latest'
+        run: Compress-Archive -Path ./dist/* -DestinationPath ${{ github.event.repository.name }}-windows.zip
+      - name: Release for linux
+        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'ubuntu-latest'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ github.event.repository.name }}-linux.tar.xz
+          generate_release_notes: true
+      - name: Release for windows
+        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ github.event.repository.name }}-windows.zip
+          generate_release_notes: true

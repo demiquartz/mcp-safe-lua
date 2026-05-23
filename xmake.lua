@@ -21,3 +21,6 @@ target(project)
     set_configvar("version", version)
     add_configfiles("src/config.hpp.in")
     add_includedirs("$(builddir)")
+    local document = "share/doc/" .. project
+    add_installfiles("LICENSE", {prefixdir = document})
+    add_installfiles("NOTICE", {prefixdir = document})
