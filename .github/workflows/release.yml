@@ -50,7 +50,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: ${{ github.event.repository.name }}-linux.tar.xz
-          generate_release_notes: true
       - name: Release for windows
         if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
         uses: softprops/action-gh-release@v3
