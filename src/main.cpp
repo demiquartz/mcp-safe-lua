@@ -367,7 +367,6 @@ auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
                 if (auto pe = glz::read<RequireAllKeys>(request, buffer)) {
                     std::println(stderr, "{}", glz::format_error(pe, buffer));
                 }
-                std::print(stderr, "{}", std::string_view(buffer));
                 if (request.method == "initialize") {
                     Response response;
                     response.result.protocolVersion = ProtocolVersion;
@@ -426,8 +425,7 @@ auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
                         std::println(stderr, "{}", glz::format_error(pe, buffer));
                     }
                 }
-                std::println(stdout, "{}", std::string_view(buffer));
-                std::println(stderr, "{}", std::string_view(buffer));
+                std::println("{}", std::string_view(buffer));
                 buffer.clear();
             }
         }
