@@ -426,10 +426,7 @@ auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
                         std::println(stderr, "{}", glz::format_error(pe, buffer));
                     }
                 }
-                for (auto c : buffer) {
-                    std::fputc(c, stdout);
-                }
-                std::fputc('\n', stdout);
+                std::println(stdout, "{}", std::string_view(buffer));
                 std::println(stderr, "{}", std::string_view(buffer));
                 buffer.clear();
             }
