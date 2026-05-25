@@ -91,6 +91,7 @@ namespace {
 using namespace std::string_view_literals;
 constexpr auto OutputTruncated = "<output_truncated/>\n"sv;
 constexpr auto ProtocolVersion = "2025-11-25";
+constexpr auto PacketSize = 1ZU << 9;
 
 void RegisterCoreBindings(lua_State* state)
 {
@@ -345,7 +346,26 @@ void Serve(auto&& handler)
     std::string request;
     while (std::getline(std::cin, request)) {
         if (auto response = handler(request); !response.empty()) {
-            std::println("{}", response);
+            response.push_back('\n');
+            for (auto i = 0ZU, n = response.size(); i < n; i += PacketSize) {
+                auto s = std::string_view(response).substr(i, PacketSize);
+                for (auto [j, c] : s | std::views::reverse | std::views::take(4) | std::views::enumerate) {
+                    auto k = std::countl_one<unsigned char>(c);
+                    if (k == 0) {
+                        break;
+                    }
+                    if (k == 1) {
+                        continue;
+                    }
+                    if (k >= 2 + j) {
+                        i -= 1 + j;
+                        s.remove_suffix(1 + j);
+                    }
+                    break;
+                }
+                std::fwrite(s.data(), s.size(), 1, stdout);
+                std::fflush(stdout);
+            }
         }
     }
 }
