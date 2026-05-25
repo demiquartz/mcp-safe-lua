@@ -15,6 +15,14 @@
 
 constexpr glz::opts RequireAllKeys{.error_on_unknown_keys = false, .error_on_missing_keys = true};
 
+struct Config {
+    std::size_t maxExecutionMs;
+    std::size_t maxMemoryBytes;
+    std::size_t maxOutputBytes;
+    std::size_t maxPacketBytes;
+    std::size_t maxResultBytes;
+};
+
 struct Content {
     std::string output;
     std::vector<std::string> result;
@@ -90,8 +98,7 @@ namespace {
 
 using namespace std::string_view_literals;
 constexpr auto OutputTruncated = "<output_truncated/>\n"sv;
-constexpr auto ProtocolVersion = "2025-11-25";
-constexpr auto PacketSize = 1ZU << 9;
+constexpr auto ProtocolVersion = "2025-11-25"sv;
 
 void RegisterCoreBindings(lua_State* state)
 {
@@ -143,10 +150,11 @@ void RegisterCoreBindings(lua_State* state)
     lua_setfield(state, -2, "utf8");
 }
 
-void RegisterHostBindings(lua_State* state, std::string& buffer)
+void RegisterHostBindings(lua_State* state, std::string& buffer, std::size_t cutoff)
 {
     auto print = [](lua_State* state) -> int {
         auto buffer = static_cast<std::string*>(lua_touserdata(state, lua_upvalueindex(1)));
+        auto cutoff = static_cast<std::size_t*>(lua_touserdata(state, lua_upvalueindex(2)));
         auto offset = buffer->size();
         if (!buffer->ends_with(OutputTruncated)) {
             std::string source;
@@ -236,7 +244,7 @@ void RegisterHostBindings(lua_State* state, std::string& buffer)
                     }
                     lua_settop(state, -2);
                 }
-                if (buffer->size() + source.size() >= 0xfffe - OutputTruncated.size()) {
+                if (buffer->size() + source.size() + 1 >= *cutoff - OutputTruncated.size()) {
                     buffer->append(OutputTruncated);
                     break;
                 }
@@ -253,7 +261,8 @@ void RegisterHostBindings(lua_State* state, std::string& buffer)
         return 0;
     };
     lua_pushlightuserdata(state, &buffer);
-    lua_pushcclosure(state, print, 1);
+    lua_pushlightuserdata(state, &cutoff);
+    lua_pushcclosure(state, print, 2);
     lua_setfield(state, -2, "print");
 }
 
@@ -279,11 +288,12 @@ auto Allocate(void* ud, void* ptr, std::size_t osize, std::size_t nsize) -> void
     return nptr;
 }
 
-using duration = std::chrono::steady_clock::duration;
-auto Execute(const std::string& script, duration grace, std::size_t avail) -> std::tuple<std::string, bool>
+auto Execute(const Config& config, const std::string& script) -> std::tuple<std::string, bool>
 {
     Content content;
-    auto limit = std::chrono::steady_clock::now() + grace;
+    auto quota = config.maxResultBytes;
+    auto avail = config.maxMemoryBytes;
+    auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(config.maxExecutionMs);
     if (auto state = std::unique_ptr<lua_State, void (*)(lua_State*)>(
             lua_newstate(Allocate, &avail, luaL_makeseed(nullptr)), lua_close)) {
         if (luaL_loadstring(state.get(), script.c_str())) {
@@ -299,18 +309,18 @@ auto Execute(const std::string& script, duration grace, std::size_t avail) -> st
         }
         lua_newtable(state.get());
         RegisterCoreBindings(state.get());
-        RegisterHostBindings(state.get(), content.output);
+        RegisterHostBindings(state.get(), content.output, config.maxOutputBytes);
         lua_pushvalue(state.get(), -1);
         lua_setfield(state.get(), -2, "_G");
         lua_setupvalue(state.get(), -2, 1);
         auto extra = reinterpret_cast<std::byte*>(state.get()) - LUA_EXTRASPACE;
-        reinterpret_cast<std::chrono::steady_clock::time_point**>(extra)[0] = &limit;
+        reinterpret_cast<std::chrono::steady_clock::time_point**>(extra)[0] = &until;
         lua_sethook(
             state.get(),
             [](lua_State* state, lua_Debug*) -> void {
                 auto extra = reinterpret_cast<std::byte*>(state) - LUA_EXTRASPACE;
-                auto limit = reinterpret_cast<std::chrono::steady_clock::time_point**>(extra)[0];
-                if (*limit < std::chrono::steady_clock::now()) {
+                auto until = reinterpret_cast<std::chrono::steady_clock::time_point**>(extra)[0];
+                if (*until < std::chrono::steady_clock::now()) {
                     luaL_error(state, "timeout exceeded");
                 }
             },
@@ -329,6 +339,12 @@ auto Execute(const std::string& script, duration grace, std::size_t avail) -> st
         for (auto i = 1, n = lua_gettop(state.get()); i <= n; ++i) {
             std::size_t length;
             content.result.emplace_back(luaL_tolstring(state.get(), i, &length), length);
+            if (quota < length) {
+                content.output.append("result too large\n");
+                content.result.clear();
+                break;
+            }
+            quota -= length;
         }
     }
     else {
@@ -341,14 +357,14 @@ auto Execute(const std::string& script, duration grace, std::size_t avail) -> st
     return {buffer, false};
 }
 
-void Serve(auto&& handler)
+void Serve(const Config& config, auto&& handler)
 {
     std::string request;
     while (std::getline(std::cin, request)) {
         if (auto response = handler(request); !response.empty()) {
             response.push_back('\n');
-            for (auto i = 0ZU, n = response.size(); i < n; i += PacketSize) {
-                auto s = std::string_view(response).substr(i, PacketSize);
+            for (auto i = 0ZU, n = response.size(); i < n; i += config.maxPacketBytes) {
+                auto s = std::string_view(response).substr(i, config.maxPacketBytes);
                 for (auto [j, c] : s | std::views::reverse | std::views::take(4) | std::views::enumerate) {
                     auto k = std::countl_one<unsigned char>(c);
                     if (k == 0) {
@@ -372,8 +388,25 @@ void Serve(auto&& handler)
 
 } // namespace
 
-auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
+auto main(int argc, char** argv) -> int
 {
+    Config config{
+        .maxExecutionMs = 10000ZU,
+        .maxMemoryBytes = 1ZU << 30,
+        .maxOutputBytes = 1ZU << 16,
+        .maxPacketBytes = 1ZU << 9,
+        .maxResultBytes = 1ZU << 12,
+    };
+    std::vector<std::string_view> paths;
+    paths.reserve(argc);
+    paths.emplace_back("config.json");
+    paths.append_range(std::span(argv, argc).subspan(1));
+    std::string buffer;
+    for (auto path : paths | std::views::filter([](auto path) -> auto { return std::filesystem::exists(path); })) {
+        if (auto pe = glz::read_file_json(config, path, buffer)) {
+            std::println(stderr, "{}", glz::format_error(pe, buffer));
+        }
+    }
     try {
         glz::rpc::server<glz::rpc::method<"notifications/initialized", ParamsNotifications, ResultNotifications>,
                          glz::rpc::method<"initialize", ParamsInitialize, ResultInitialize>,
@@ -397,7 +430,7 @@ auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
                                "Must be used for solving or validating structural and deterministic tasks, "
                                "no matter how simple or trivial. "
                                "Available: 'math', 'string', 'table', 'utf8', and restricted basic functions ONLY. "
-                               "Stateless, binary-safe. Limits: 10s timeout, 1GB RAM, 64KB print truncation. "
+                               "Stateless, binary-safe, and resource-limited. "
                                "Output mapping: 'return' -> 'result' array, 'print()' -> 'output' string.";
             tool.inputSchema.properties.script.title = "script";
             tool.inputSchema.properties.script.type = "string";
@@ -407,11 +440,11 @@ auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
             tool.inputSchema.type = "object";
             return result;
         });
-        server.on<"tools/call">([](const auto& params) -> auto {
+        server.on<"tools/call">([&config](const auto& params) -> auto {
             ResultToolsCall result;
             if (params.name == "execute_lua") {
                 using namespace std::chrono_literals;
-                auto results = Execute(params.arguments.script, 10s, 1 << 30);
+                auto results = Execute(config, params.arguments.script);
                 result.content[0].type = "text";
                 result.content[0].text = std::get<0>(results);
                 result.isError = std::get<1>(results);
@@ -421,7 +454,7 @@ auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
             }
             return result;
         });
-        Serve([&server](const auto& request) -> auto { return server.call(request); });
+        Serve(config, [&server](const auto& request) -> auto { return server.call(request); });
     }
     catch (const std::exception& e) {
         std::println(stderr, "{}", e.what());
