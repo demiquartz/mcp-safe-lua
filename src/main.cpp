@@ -5,55 +5,19 @@
  * @brief Provides the main entry point and dispatches JSON-RPC requests.
  */
 
-#include <array>
-#include <chrono>
-#include <cstddef>
-#include <cstdlib>
-#include <exception>
-#include <format>
-#include <iterator>
-#include <new>
+#include <iostream>
 #include <print>
-#include <string>
-#include <string_view>
-#include <vector>
 
-#include <glaze/json.hpp>
+#include <glaze/ext/jsonrpc.hpp>
 #include <lua.hpp>
 
 #include "config.hpp"
 
 constexpr glz::opts RequireAllKeys{.error_on_unknown_keys = false, .error_on_missing_keys = true};
 
-struct CallParams {
-    std::string name;
-    struct {
-        std::string script;
-    } arguments;
-};
-
-struct Request {
-    std::string method;
-    std::string jsonrpc;
-    std::optional<glz::generic> params;
-    std::optional<std::size_t> id;
-};
-
-struct Response {
-    struct {
-        std::string protocolVersion;
-        struct {
-            struct {
-                bool listChanged;
-            } tools;
-        } capabilities;
-        struct {
-            std::string name;
-            std::string version;
-        } serverInfo;
-    } result;
-    std::string jsonrpc;
-    std::optional<std::size_t> id;
+struct Content {
+    std::string output;
+    std::vector<std::string> result;
 };
 
 struct Tool {
@@ -73,30 +37,53 @@ struct Tool {
     } inputSchema;
 };
 
-struct ResponseTools {
+struct ParamsInitialize {
+    std::string protocolVersion;
     struct {
-        std::vector<Tool> tools;
-    } result;
-    std::string jsonrpc;
-    std::optional<std::size_t> id;
+    } capabilities;
+    struct {
+        std::string name;
+        std::string version;
+    } clientInfo;
 };
 
-struct ResponseToolsCall {
+struct ResultInitialize {
+    std::string protocolVersion;
     struct {
-        struct Content {
-            std::string type;
-            std::string text;
-        };
-        std::array<Content, 1> content;
-        bool isError;
-    } result;
-    std::string jsonrpc;
-    std::optional<std::size_t> id;
+        struct {
+            bool listChanged;
+        } tools;
+    } capabilities;
+    struct {
+        std::string name;
+        std::string version;
+    } serverInfo;
 };
 
-struct Content {
-    std::string output;
-    std::vector<std::string> result;
+struct ParamsNotifications {};
+
+struct ResultNotifications {};
+
+struct ParamsToolsList {};
+
+struct ResultToolsList {
+    std::vector<Tool> tools;
+};
+
+struct ParamsToolsCall {
+    std::string name;
+    struct {
+        std::string script;
+    } arguments;
+};
+
+struct ResultToolsCall {
+    struct Content {
+        std::string type;
+        std::string text;
+    };
+    std::array<Content, 1> content;
+    bool isError;
 };
 
 namespace {
@@ -353,82 +340,68 @@ auto Execute(const std::string& script, duration grace, std::size_t avail) -> st
     return {buffer, false};
 }
 
+void Serve(auto&& handler)
+{
+    std::string request;
+    while (std::getline(std::cin, request)) {
+        if (auto response = handler(request); !response.empty()) {
+            std::println("{}", response);
+        }
+    }
+}
+
 } // namespace
 
 auto main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) -> int
 {
     try {
-        std::vector<char> buffer;
-        std::setvbuf(stdin, nullptr, _IONBF, 0);
-        std::setvbuf(stdout, nullptr, _IONBF, 0);
-        for (auto c = std::fgetc(stdin); c != EOF; c = std::fgetc(stdin)) {
-            if (buffer.emplace_back(static_cast<char>(c)) == '\n') {
-                Request request;
-                if (auto pe = glz::read<RequireAllKeys>(request, buffer)) {
-                    std::println(stderr, "{}", glz::format_error(pe, buffer));
-                }
-                if (request.method == "initialize") {
-                    Response response;
-                    response.result.protocolVersion = ProtocolVersion;
-                    response.result.capabilities.tools.listChanged = true;
-                    response.result.serverInfo.name = SafeLua::Project;
-                    response.result.serverInfo.version = SafeLua::Version;
-                    response.jsonrpc = request.jsonrpc;
-                    response.id = request.id;
-                    if (auto pe = glz::write<RequireAllKeys>(response, buffer)) {
-                        std::println(stderr, "{}", glz::format_error(pe, buffer));
-                    }
-                }
-                if (request.method == "tools/list") {
-                    ResponseTools response;
-                    auto& tool = response.result.tools.emplace_back();
-                    tool.name = "execute_lua";
-                    tool.description =
-                        "Executes strictly sandboxed Lua 5.5 scripts. "
-                        "Must be used for solving or validating structural and deterministic tasks, "
-                        "no matter how simple or trivial. "
-                        "Available: 'math', 'string', 'table', 'utf8', and restricted basic functions ONLY. "
-                        "Stateless, binary-safe. Limits: 10s timeout, 1GB RAM, 64KB print truncation. "
-                        "Output mapping: 'return' -> 'result' array, 'print()' -> 'output' string.";
-                    tool.inputSchema.properties.script.title = "script";
-                    tool.inputSchema.properties.script.type = "string";
-                    tool.inputSchema.properties.script.description =
-                        "Raw Lua code to execute. Do NOT wrap in markdown blocks.";
-                    tool.inputSchema.required[0] = "script";
-                    tool.inputSchema.title = "result";
-                    tool.inputSchema.type = "object";
-                    response.jsonrpc = request.jsonrpc;
-                    response.id = request.id;
-                    if (auto pe = glz::write<RequireAllKeys>(response, buffer)) {
-                        std::println(stderr, "{}", glz::format_error(pe, buffer));
-                    }
-                }
-                if (request.method == "tools/call") {
-                    CallParams params;
-                    if (auto pe = glz::read<RequireAllKeys>(params, request.params.value())) {
-                        std::println(stderr, "{}", glz::format_error(pe, buffer));
-                    }
-                    ResponseToolsCall response;
-                    if (params.name == "execute_lua") {
-                        using namespace std::chrono_literals;
-                        auto result = Execute(params.arguments.script, 10s, 1 << 30);
-                        response.result.content[0].type = "text";
-                        response.result.content[0].text = std::get<0>(result);
-                        response.result.isError = std::get<1>(result);
-                    }
-                    else {
-                        response.result.isError = true;
-                    }
-                    response.jsonrpc = request.jsonrpc;
-                    response.id = request.id;
-                    if (auto pe = glz::write<RequireAllKeys>(response, buffer)) {
-                        std::println(stderr, "{}", glz::format_error(pe, buffer));
-                    }
-                }
-                std::println("{}", std::string_view(buffer));
-                buffer.clear();
+        glz::rpc::server<glz::rpc::method<"notifications/initialized", ParamsNotifications, ResultNotifications>,
+                         glz::rpc::method<"initialize", ParamsInitialize, ResultInitialize>,
+                         glz::rpc::method<"tools/list", ParamsToolsList, ResultToolsList>,
+                         glz::rpc::method<"tools/call", ParamsToolsCall, ResultToolsCall>>
+            server;
+        server.on<"notifications/initialized">([](const auto&) -> auto { return ResultNotifications{}; });
+        server.on<"initialize">([](const auto&) -> auto {
+            ResultInitialize result;
+            result.protocolVersion = ProtocolVersion;
+            result.capabilities.tools.listChanged = true;
+            result.serverInfo.name = SafeLua::Project;
+            result.serverInfo.version = SafeLua::Version;
+            return result;
+        });
+        server.on<"tools/list">([](const auto&) -> auto {
+            ResultToolsList result;
+            auto& tool = result.tools.emplace_back();
+            tool.name = "execute_lua";
+            tool.description = "Executes strictly sandboxed Lua 5.5 scripts. "
+                               "Must be used for solving or validating structural and deterministic tasks, "
+                               "no matter how simple or trivial. "
+                               "Available: 'math', 'string', 'table', 'utf8', and restricted basic functions ONLY. "
+                               "Stateless, binary-safe. Limits: 10s timeout, 1GB RAM, 64KB print truncation. "
+                               "Output mapping: 'return' -> 'result' array, 'print()' -> 'output' string.";
+            tool.inputSchema.properties.script.title = "script";
+            tool.inputSchema.properties.script.type = "string";
+            tool.inputSchema.properties.script.description = "Raw Lua code to execute. Do NOT wrap in markdown blocks.";
+            tool.inputSchema.required[0] = "script";
+            tool.inputSchema.title = "result";
+            tool.inputSchema.type = "object";
+            return result;
+        });
+        server.on<"tools/call">([](const auto& params) -> auto {
+            ResultToolsCall result;
+            if (params.name == "execute_lua") {
+                using namespace std::chrono_literals;
+                auto results = Execute(params.arguments.script, 10s, 1 << 30);
+                result.content[0].type = "text";
+                result.content[0].text = std::get<0>(results);
+                result.isError = std::get<1>(results);
             }
-        }
+            else {
+                result.isError = true;
+            }
+            return result;
+        });
+        Serve([&server](const auto& request) -> auto { return server.call(request); });
     }
     catch (const std::exception& e) {
         std::println(stderr, "{}", e.what());
