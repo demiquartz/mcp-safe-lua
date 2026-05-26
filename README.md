@@ -32,7 +32,7 @@ True to its name, `mcp-safe-lua` provides a secure computing environment. No mat
 
 ### Output Limit
 
-Standard output is strictly capped at 64 KB.
+Standard output is capped at 64 KB by default, but this limit is configurable.
 
 Allowing a script to return unbounded, limitless text to an LLM would instantly overwhelm its context window. Even with massive modern context windows, flooding them with raw, runaway logs obliterates the model's attention span and nukes your token budget.
 
@@ -67,21 +67,21 @@ The explicitly exposed API consists strictly of the following:
 
 A custom Lua allocator is implemented to track and limit memory usage.
 
-- **Hard Limit**: 1 GB.
+- **Default Limit**: 1 GB (Configurable).
 - If a script exceeds this limit, the execution is immediately terminated with an "out of memory" error.
 
 ### Execution Time Limit
 
 To prevent infinite loops or CPU exhaustion, `lua_sethook` is used to monitor execution.
 
-- **Timeout**: 10 seconds.
+- **Default Timeout**: 10 seconds (Configurable).
 - Scripts that run longer than the timeout are aborted.
 
 ### Output Limits & Sanitization
 
 A custom `print` function is implemented to protect the communication channel and context window.
 
-- **Hard Limit**: 64 KB.
+- **Default Limit**: 64 KB (Configurable).
 - If the output exceeds this limit, the text is automatically truncated.
 - If the output contains invalid UTF-8 bytes or control characters, they are converted into literal hexadecimal escapes (`\xXX`).
 
@@ -178,8 +178,13 @@ The server returns the execution logs in `output` and the return value in `resul
 }
 ```
 
-## 🗺️ Roadmap / TODO
-- [ ] Support configurable resource limits (memory, timeout, output) via command-line arguments.
+## 🗺️ Roadmap
+- [ ] Code refactoring and architectural improvements
+- [ ] Performance optimizations
+- [ ] Verify strict compliance with MCP specifications
+- [ ] Support for remote MCP connections
+- [ ] Implement comprehensive automated testing
+- [ ] Expand and refine technical documentation
 
 ## 📄 License
 
