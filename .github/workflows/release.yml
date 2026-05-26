@@ -20,11 +20,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+      - name: Setup stdlib
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes libstdc++-15-dev
       - name: Setup clang
-        uses: egor-tensin/setup-clang@v2
+        uses: KyleMayes/install-llvm-action@v2
         with:
-          version: '22'
-          platform: x64
+          version: "21"
       - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@v1
         with:
@@ -50,6 +55,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: ${{ github.event.repository.name }}-linux.tar.xz
+          generate_release_notes: true
       - name: Release for windows
         if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
         uses: softprops/action-gh-release@v3
