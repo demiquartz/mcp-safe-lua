@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Release on ${{ matrix.os }}
+  build:
+    name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,22 +43,42 @@ jobs:
       - name: Build
         run: xmake build --yes
       - name: Install
-        run: xmake install --yes --installdir=./dist
+        run: xmake install --yes --installdir=./package
       - name: Package for linux
         if: matrix.os == 'ubuntu-latest'
-        run: tar --create --xz --file ${{ github.event.repository.name }}-linux.tar.xz --directory ./dist .
+        run: |
+          mkdir dist
+          tar --create --xz --file dist/${{ github.event.repository.name }}-linux.tar.xz --directory ./package .
       - name: Package for windows
         if: matrix.os == 'windows-latest'
-        run: Compress-Archive -Path ./dist/* -DestinationPath ${{ github.event.repository.name }}-windows.zip
-      - name: Release for linux
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'ubuntu-latest'
-        uses: softprops/action-gh-release@v3
+        run: |
+          New-Item -ItemType Directory dist
+          Compress-Archive -Path ./package/* -DestinationPath dist/${{ github.event.repository.name }}-windows.zip
+      - name: Upload
+        uses: actions/upload-artifact@v7
         with:
-          files: ${{ github.event.repository.name }}-linux.tar.xz
-          generate_release_notes: true
-      - name: Release for windows
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
-        uses: softprops/action-gh-release@v3
+          name: ${{ github.event.repository.name }}-${{ matrix.os }}
+          path: dist/*
+          archive: false
+          retention-days: 1
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
-          files: ${{ github.event.repository.name }}-windows.zip
-          generate_release_notes: true
+          fetch-depth: 0
+      - name: Download
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ github.event.repository.name }}-*
+          path: dist
+          archive: false
+          merge-multiple: true
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes
