@@ -100,6 +100,119 @@ using namespace std::string_view_literals;
 constexpr auto OutputTruncated = "<output_truncated/>\n"sv;
 constexpr auto ProtocolVersion = "2025-11-25"sv;
 
+void Sanitize(std::string_view source, std::string& result)
+{
+    std::string buffer;
+    for (auto c : source) {
+        if (~c & 0x80 || c & 0x40) {
+            for (auto c : buffer) {
+                std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+            }
+            buffer.clear();
+        }
+        if (~c & 0x80) {
+            if (c < 0x20 && c != '\b' && c != '\t' && c != '\n' && c != '\f' && c != '\r') {
+                std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+            }
+            else {
+                result.push_back(c);
+            }
+            continue;
+        }
+        buffer.push_back(c);
+        if (~buffer.front() & 0x40) {
+            std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+            buffer.clear();
+            continue;
+        }
+        if (~buffer.front() & 0x20) {
+            if (buffer.size() == 2) {
+                auto c = buffer[0] & 0x1f;
+                c = c << 6 | (buffer[1] & 0x3f);
+                if (c < 0x80) [[unlikely]] {
+                    for (auto c : buffer) {
+                        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+                    }
+                }
+                else {
+                    result.append(buffer);
+                }
+                buffer.clear();
+            }
+            continue;
+        }
+        if (~buffer.front() & 0x10) {
+            if (buffer.size() == 3) {
+                auto c = buffer[0] & 0x0f;
+                c = c << 6 | (buffer[1] & 0x3f);
+                c = c << 6 | (buffer[2] & 0x3f);
+                if (c < 0x0800 || (c >= 0xd800 && c < 0xe000)) [[unlikely]] {
+                    for (auto c : buffer) {
+                        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+                    }
+                }
+                else {
+                    result.append(buffer);
+                }
+                buffer.clear();
+            }
+            continue;
+        }
+        if (~buffer.front() & 0x08) {
+            if (buffer.size() == 4) {
+                auto c = buffer[0] & 0x07;
+                c = c << 6 | (buffer[1] & 0x3f);
+                c = c << 6 | (buffer[2] & 0x3f);
+                c = c << 6 | (buffer[3] & 0x3f);
+                if (c < 0x010000 || c >= 0x110000) [[unlikely]] {
+                    for (auto c : buffer) {
+                        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+                    }
+                }
+                else {
+                    result.append(buffer);
+                }
+                buffer.clear();
+            }
+            continue;
+        }
+        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+        buffer.clear();
+    }
+    for (auto c : buffer) {
+        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+    }
+}
+
+auto Print(lua_State* state) -> int
+{
+    auto buffer = static_cast<std::string*>(lua_touserdata(state, lua_upvalueindex(1)));
+    auto cutoff = static_cast<std::size_t*>(lua_touserdata(state, lua_upvalueindex(2)));
+    auto offset = buffer->size();
+    if (!buffer->ends_with(OutputTruncated)) {
+        std::string result;
+        std::size_t length;
+        for (auto i = 1, n = lua_gettop(state); i <= n; ++i) {
+            result.clear();
+            Sanitize({luaL_tolstring(state, i, &length), length}, result);
+            lua_settop(state, -2);
+            if (buffer->size() + result.size() + 1 >= *cutoff - OutputTruncated.size()) {
+                buffer->append(OutputTruncated);
+                break;
+            }
+            buffer->append(result);
+            buffer->push_back('\t');
+        }
+        if (buffer->size() == offset) {
+            buffer->push_back('\n');
+        }
+        else {
+            buffer->back() = '\n';
+        }
+    }
+    return 0;
+}
+
 void RegisterCoreBindings(lua_State* state)
 {
     luaopen_base(state);
@@ -152,117 +265,9 @@ void RegisterCoreBindings(lua_State* state)
 
 void RegisterHostBindings(lua_State* state, std::string& buffer, std::size_t cutoff)
 {
-    auto print = [](lua_State* state) -> int {
-        auto buffer = static_cast<std::string*>(lua_touserdata(state, lua_upvalueindex(1)));
-        auto cutoff = static_cast<std::size_t*>(lua_touserdata(state, lua_upvalueindex(2)));
-        auto offset = buffer->size();
-        if (!buffer->ends_with(OutputTruncated)) {
-            std::string source;
-            std::size_t length;
-            for (auto i = 1, n = lua_gettop(state); i <= n; ++i) {
-                source.clear();
-                {
-                    std::string buffer;
-                    for (auto c : std::string_view{luaL_tolstring(state, i, &length), length}) {
-                        if (~c & 0x80 || c & 0x40) {
-                            for (auto c : buffer) {
-                                std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                            }
-                            buffer.clear();
-                        }
-                        if (~c & 0x80) {
-                            if (c < 0x20 && c != '\b' && c != '\t' && c != '\n' && c != '\f' && c != '\r') {
-                                std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                            }
-                            else {
-                                source.push_back(c);
-                            }
-                            continue;
-                        }
-                        buffer.push_back(c);
-                        if (~buffer.front() & 0x40) {
-                            std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                            buffer.clear();
-                            continue;
-                        }
-                        if (~buffer.front() & 0x20) {
-                            if (buffer.size() == 2) {
-                                auto c = buffer[0] & 0x1f;
-                                c = c << 6 | (buffer[1] & 0x3f);
-                                if (c < 0x80) [[unlikely]] {
-                                    for (auto c : buffer) {
-                                        std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                                    }
-                                }
-                                else {
-                                    source.append(buffer);
-                                }
-                                buffer.clear();
-                            }
-                            continue;
-                        }
-                        if (~buffer.front() & 0x10) {
-                            if (buffer.size() == 3) {
-                                auto c = buffer[0] & 0x0f;
-                                c = c << 6 | (buffer[1] & 0x3f);
-                                c = c << 6 | (buffer[2] & 0x3f);
-                                if (c < 0x0800 || (c >= 0xd800 && c < 0xe000)) [[unlikely]] {
-                                    for (auto c : buffer) {
-                                        std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                                    }
-                                }
-                                else {
-                                    source.append(buffer);
-                                }
-                                buffer.clear();
-                            }
-                            continue;
-                        }
-                        if (~buffer.front() & 0x08) {
-                            if (buffer.size() == 4) {
-                                auto c = buffer[0] & 0x07;
-                                c = c << 6 | (buffer[1] & 0x3f);
-                                c = c << 6 | (buffer[2] & 0x3f);
-                                c = c << 6 | (buffer[3] & 0x3f);
-                                if (c < 0x010000 || c >= 0x110000) [[unlikely]] {
-                                    for (auto c : buffer) {
-                                        std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                                    }
-                                }
-                                else {
-                                    source.append(buffer);
-                                }
-                                buffer.clear();
-                            }
-                            continue;
-                        }
-                        std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                        buffer.clear();
-                    }
-                    for (auto c : buffer) {
-                        std::format_to(std::back_inserter(source), "\\x{:02X}", c);
-                    }
-                    lua_settop(state, -2);
-                }
-                if (buffer->size() + source.size() + 1 >= *cutoff - OutputTruncated.size()) {
-                    buffer->append(OutputTruncated);
-                    break;
-                }
-                buffer->append(source);
-                buffer->push_back('\t');
-            }
-            if (buffer->size() == offset) {
-                buffer->push_back('\n');
-            }
-            else {
-                buffer->back() = '\n';
-            }
-        }
-        return 0;
-    };
     lua_pushlightuserdata(state, &buffer);
     lua_pushlightuserdata(state, &cutoff);
-    lua_pushcclosure(state, print, 2);
+    lua_pushcclosure(state, Print, 2);
     lua_setfield(state, -2, "print");
 }
 
