@@ -343,7 +343,7 @@ auto Execute(const Config& config, const std::string& script) -> std::tuple<std:
         }
         for (auto i = 1, n = lua_gettop(state.get()); i <= n; ++i) {
             std::size_t length;
-            content.result.emplace_back(luaL_tolstring(state.get(), i, &length), length);
+            Sanitize({luaL_tolstring(state.get(), i, &length), length}, content.result.emplace_back());
             if (quota < length) {
                 content.output.append("result too large\n");
                 content.result.clear();
