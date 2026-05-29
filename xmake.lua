@@ -10,6 +10,7 @@ set_license(license)
 add_rules("mode.debug", "mode.release")
 set_languages("c++23")
 set_warnings("all", "extra", "pedantic")
+add_cxflags("-Wno-parentheses")
 
 add_requires("glaze 7.0.x", "lua 5.5.x")
 

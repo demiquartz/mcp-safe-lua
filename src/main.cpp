@@ -98,90 +98,59 @@ namespace {
 
 using namespace std::string_view_literals;
 constexpr auto OutputTruncated = "<output_truncated/>\n"sv;
-constexpr auto ProtocolVersion = "2025-11-25"sv;
+constexpr auto ProtocolVersion = "2025-11-25";
+constexpr auto IsValid = std::to_array<bool (*)(int)>({
+    [](int c) -> bool { return c >= 0x20 || c == '\b' || c == '\t' || c == '\n' || c == '\f' || c == '\r'; },
+    [](int) -> bool { return false; },
+    [](int c) -> bool { return c >= 0x80; },
+    [](int c) -> bool { return c >= 0x0800 && c < 0xd800 || c >= 0xe000; },
+    [](int c) -> bool { return c >= 0x010000 && c < 0x110000; },
+});
+
+auto Decode(std::string_view s, int n) -> int
+{
+    auto c = s[0] & 0x7f >> n;
+    for (auto i = 1; i < n; ++i) {
+        c = s[i] & 0x3f | c << 6;
+    }
+    return c;
+}
 
 void Sanitize(std::string_view source, std::string& result)
 {
-    std::string buffer;
-    for (auto c : source) {
-        if (~c & 0x80 || c & 0x40) {
-            for (auto c : buffer) {
-                std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-            }
-            buffer.clear();
+    auto buffer = std::string{};
+    auto escape = [&buffer, &result] -> void {
+        for (auto c : buffer) {
+            std::format_to(std::back_inserter(result), "\\x{:02X}", c);
         }
-        if (~c & 0x80) {
-            if (c < 0x20 && c != '\b' && c != '\t' && c != '\n' && c != '\f' && c != '\r') {
-                std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-            }
-            else {
-                result.push_back(c);
-            }
-            continue;
+        buffer.clear();
+    };
+    for (auto c : source) {
+        if (std::countl_one<unsigned char>(c) != 1) {
+            escape();
         }
         buffer.push_back(c);
-        if (~buffer.front() & 0x40) {
-            std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-            buffer.clear();
-            continue;
-        }
-        if (~buffer.front() & 0x20) {
-            if (buffer.size() == 2) {
-                auto c = buffer[0] & 0x1f;
-                c = c << 6 | (buffer[1] & 0x3f);
-                if (c < 0x80) [[unlikely]] {
-                    for (auto c : buffer) {
-                        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-                    }
-                }
-                else {
-                    result.append(buffer);
-                }
-                buffer.clear();
+        auto i = std::countl_one<unsigned char>(buffer.front());
+        if (i < static_cast<int>(IsValid.size())) {
+            if (i != 0 && i > static_cast<int>(buffer.size())) {
+                continue;
             }
-            continue;
-        }
-        if (~buffer.front() & 0x10) {
-            if (buffer.size() == 3) {
-                auto c = buffer[0] & 0x0f;
-                c = c << 6 | (buffer[1] & 0x3f);
-                c = c << 6 | (buffer[2] & 0x3f);
-                if (c < 0x0800 || (c >= 0xd800 && c < 0xe000)) [[unlikely]] {
-                    for (auto c : buffer) {
-                        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-                    }
-                }
-                else {
-                    result.append(buffer);
-                }
+            if (IsValid[i](Decode(buffer, i))) [[likely]] {
+                result.append(buffer);
                 buffer.clear();
+                continue;
             }
-            continue;
         }
-        if (~buffer.front() & 0x08) {
-            if (buffer.size() == 4) {
-                auto c = buffer[0] & 0x07;
-                c = c << 6 | (buffer[1] & 0x3f);
-                c = c << 6 | (buffer[2] & 0x3f);
-                c = c << 6 | (buffer[3] & 0x3f);
-                if (c < 0x010000 || c >= 0x110000) [[unlikely]] {
-                    for (auto c : buffer) {
-                        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-                    }
-                }
-                else {
-                    result.append(buffer);
-                }
-                buffer.clear();
-            }
-            continue;
-        }
-        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-        buffer.clear();
+        escape();
     }
-    for (auto c : buffer) {
-        std::format_to(std::back_inserter(result), "\\x{:02X}", c);
-    }
+    escape();
+}
+
+void SanitizeFromStack(lua_State* state, int index, std::string& result)
+{
+    auto length = 0ZU;
+    Sanitize({luaL_tolstring(state, index, &length), length}, result);
+    lua_settop(state, -2);
 }
 
 auto Print(lua_State* state) -> int
@@ -190,13 +159,11 @@ auto Print(lua_State* state) -> int
     auto cutoff = static_cast<std::size_t*>(lua_touserdata(state, lua_upvalueindex(2)));
     auto offset = buffer->size();
     if (!buffer->ends_with(OutputTruncated)) {
-        std::string result;
-        std::size_t length;
+        auto result = std::string{};
         for (auto i = 1, n = lua_gettop(state); i <= n; ++i) {
             result.clear();
-            Sanitize({luaL_tolstring(state, i, &length), length}, result);
-            lua_settop(state, -2);
-            if (buffer->size() + result.size() + 1 >= *cutoff - OutputTruncated.size()) {
+            SanitizeFromStack(state, i, result);
+            if (buffer->size() + result.size() + OutputTruncated.size() + 1 >= *cutoff) {
                 buffer->append(OutputTruncated);
                 break;
             }
@@ -295,22 +262,25 @@ auto Allocate(void* ud, void* ptr, std::size_t osize, std::size_t nsize) -> void
 
 auto Execute(const Config& config, const std::string& script) -> std::tuple<std::string, bool>
 {
-    Content content;
+    auto content = Content{};
     auto quota = config.maxResultBytes;
     auto avail = config.maxMemoryBytes;
     auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(config.maxExecutionMs);
-    if (auto state = std::unique_ptr<lua_State, void (*)(lua_State*)>(
-            lua_newstate(Allocate, &avail, luaL_makeseed(nullptr)), lua_close)) {
-        if (luaL_loadstring(state.get(), script.c_str())) {
-            std::size_t length;
+    using UniqueState = std::unique_ptr<lua_State, void (*)(lua_State*)>;
+    if (auto state = UniqueState{lua_newstate(Allocate, &avail, luaL_makeseed(nullptr)), lua_close}) {
+        auto popError = [&content, &state] -> std::tuple<std::string, bool> {
+            auto length = 0ZU;
             content.output.append(lua_tolstring(state.get(), -1, &length), length);
             content.output.push_back('\n');
             lua_settop(state.get(), -2);
-            std::string buffer;
+            auto buffer = std::string{};
             if (auto pe = glz::write<RequireAllKeys>(content, buffer)) {
                 std::println(stderr, "{}", glz::format_error(pe, buffer));
             }
             return {buffer, true};
+        };
+        if (luaL_loadstring(state.get(), script.c_str())) {
+            return popError();
         }
         lua_newtable(state.get());
         RegisterCoreBindings(state.get());
@@ -331,31 +301,22 @@ auto Execute(const Config& config, const std::string& script) -> std::tuple<std:
             },
             LUA_MASKCOUNT, 0x10000);
         if (lua_pcall(state.get(), 0, LUA_MULTRET, 0)) {
-            std::size_t length;
-            content.output.append(lua_tolstring(state.get(), -1, &length), length);
-            content.output.push_back('\n');
-            lua_settop(state.get(), -2);
-            std::string buffer;
-            if (auto pe = glz::write<RequireAllKeys>(content, buffer)) {
-                std::println(stderr, "{}", glz::format_error(pe, buffer));
-            }
-            return {buffer, true};
+            return popError();
         }
         for (auto i = 1, n = lua_gettop(state.get()); i <= n; ++i) {
-            std::size_t length;
-            Sanitize({luaL_tolstring(state.get(), i, &length), length}, content.result.emplace_back());
-            if (quota < length) {
+            SanitizeFromStack(state.get(), i, content.result.emplace_back());
+            if (quota < content.result.back().size()) {
                 content.output.append("result too large\n");
                 content.result.clear();
                 break;
             }
-            quota -= length;
+            quota -= content.result.back().size();
         }
     }
     else {
         throw std::bad_alloc();
     }
-    std::string buffer;
+    auto buffer = std::string{};
     if (auto pe = glz::write<RequireAllKeys>(content, buffer)) {
         std::println(stderr, "{}", glz::format_error(pe, buffer));
     }
@@ -364,7 +325,7 @@ auto Execute(const Config& config, const std::string& script) -> std::tuple<std:
 
 void Serve(const Config& config, auto&& handler)
 {
-    std::string request;
+    auto request = std::string{};
     while (std::getline(std::cin, request)) {
         if (auto response = handler(request); !response.empty()) {
             response.push_back('\n');
@@ -395,58 +356,83 @@ void Serve(const Config& config, auto&& handler)
 
 auto main(int argc, char** argv) -> int
 {
-    Config config{
+    auto config = Config{
         .maxExecutionMs = 10000ZU,
         .maxMemoryBytes = 1ZU << 30,
         .maxOutputBytes = 1ZU << 16,
         .maxPacketBytes = 1ZU << 9,
         .maxResultBytes = 1ZU << 12,
     };
-    std::vector<std::string_view> paths;
+    auto paths = std::vector<std::string_view>{};
     paths.reserve(argc);
     paths.emplace_back("config.json");
     paths.append_range(std::span(argv, argc).subspan(1));
-    std::string buffer;
+    auto buffer = std::string{};
     for (auto path : paths | std::views::filter([](auto path) -> auto { return std::filesystem::exists(path); })) {
         if (auto pe = glz::read_file_json(config, path, buffer)) {
             std::println(stderr, "{}", glz::format_error(pe, buffer));
         }
     }
     try {
-        glz::rpc::server<glz::rpc::method<"notifications/initialized", ParamsNotifications, ResultNotifications>,
-                         glz::rpc::method<"initialize", ParamsInitialize, ResultInitialize>,
-                         glz::rpc::method<"tools/list", ParamsToolsList, ResultToolsList>,
-                         glz::rpc::method<"tools/call", ParamsToolsCall, ResultToolsCall>>
-            server;
+        // clang-format off
+        auto server = glz::rpc::server<
+            glz::rpc::method<"notifications/initialized", ParamsNotifications, ResultNotifications>,
+            glz::rpc::method<"initialize", ParamsInitialize, ResultInitialize>,
+            glz::rpc::method<"tools/list", ParamsToolsList, ResultToolsList>,
+            glz::rpc::method<"tools/call", ParamsToolsCall, ResultToolsCall>
+        >{};
+        // clang-format on
         server.on<"notifications/initialized">([](const auto&) -> auto { return ResultNotifications{}; });
         server.on<"initialize">([](const auto&) -> auto {
-            ResultInitialize result;
-            result.protocolVersion = ProtocolVersion;
-            result.capabilities.tools.listChanged = true;
-            result.serverInfo.name = SafeLua::Project;
-            result.serverInfo.version = SafeLua::Version;
-            return result;
+            // clang-format off
+            return ResultInitialize{
+                .protocolVersion = ProtocolVersion,
+                .capabilities = {
+                    .tools = {
+                        .listChanged = true,
+                    },
+                },
+                .serverInfo = {
+                    .name = SafeLua::Project,
+                    .version = SafeLua::Version,
+                },
+            };
+            // clang-format on
         });
         server.on<"tools/list">([](const auto&) -> auto {
-            ResultToolsList result;
-            auto& tool = result.tools.emplace_back();
-            tool.name = "execute_lua";
-            tool.description = "Executes strictly sandboxed Lua 5.5 scripts. "
-                               "Must be used for solving or validating structural and deterministic tasks, "
-                               "no matter how simple or trivial. "
-                               "Available: 'math', 'string', 'table', 'utf8', and restricted basic functions ONLY. "
-                               "Stateless, binary-safe, and resource-limited. "
-                               "Output mapping: 'return' -> 'result' array, 'print()' -> 'output' string.";
-            tool.inputSchema.properties.script.title = "script";
-            tool.inputSchema.properties.script.type = "string";
-            tool.inputSchema.properties.script.description = "Raw Lua code to execute. Do NOT wrap in markdown blocks.";
-            tool.inputSchema.required[0] = "script";
-            tool.inputSchema.title = "result";
-            tool.inputSchema.type = "object";
-            return result;
+            // clang-format off
+            return ResultToolsList{
+                .tools = {
+                    {
+                        .name = "execute_lua",
+                        .description =
+                            "Executes strictly sandboxed Lua 5.5 scripts. "
+                            "Must be used for solving or validating structural and deterministic tasks, "
+                            "no matter how simple or trivial. "
+                            "Available: 'math', 'string', 'table', 'utf8', and restricted basic functions ONLY. "
+                            "Stateless, binary-safe, and resource-limited. "
+                            "Output mapping: 'return' -> 'result' array, 'print()' -> 'output' string.",
+                        .inputSchema = {
+                            .properties = {
+                                .script = {
+                                    .title = "script",
+                                    .type = "string",
+                                    .description = "Raw Lua code to execute. Do NOT wrap in markdown blocks.",
+                                },
+                            },
+                            .required = {
+                                "script",
+                            },
+                            .title = "result",
+                            .type = "object",
+                        },
+                    },
+                },
+            };
+            // clang-format on
         });
         server.on<"tools/call">([&config](const auto& params) -> auto {
-            ResultToolsCall result;
+            auto result = ResultToolsCall{};
             if (params.name == "execute_lua") {
                 using namespace std::chrono_literals;
                 auto results = Execute(config, params.arguments.script);
