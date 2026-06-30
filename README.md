@@ -32,7 +32,7 @@ True to its name, `mcp-safe-lua` provides a secure computing environment. No mat
 
 ### Output Limit
 
-Standard output is capped at 64 KB by default, but this limit is configurable.
+Standard output and error are capped separately by default, and these limits are configurable to prevent context window flooding.
 
 Allowing a script to return unbounded, limitless text to an LLM would instantly overwhelm its context window. Even with massive modern context windows, flooding them with raw, runaway logs obliterates the model's attention span and nukes your token budget.
 
@@ -81,8 +81,9 @@ To prevent infinite loops or CPU exhaustion, `lua_sethook` is used to monitor ex
 
 A custom `print` function is implemented to protect the communication channel and context window.
 
-- **Default Limit**: 64 KB (Configurable).
-- If the output exceeds this limit, the text is automatically truncated.
+- **Default Limits**: 64 KB for stdout, 4 KB for stderr (Configurable).
+- **Bounded Sanitization**: The sanitization process is bounded by these limits, ensuring that the conversion of invalid bytes to hexadecimal escapes cannot lead to unbounded memory growth.
+- If the output exceeds its respective limit, the text is automatically truncated.
 - If the output contains invalid UTF-8 bytes or control characters, they are converted into literal hexadecimal escapes (`\xXX`).
 
 ## ⚙️ Installation & Build Guide
