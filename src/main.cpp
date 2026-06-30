@@ -18,9 +18,11 @@ constexpr glz::opts RequireAllKeys{.error_on_unknown_keys = false, .error_on_mis
 struct Config {
     std::size_t maxExecutionMs;
     std::size_t maxMemoryBytes;
-    std::size_t maxOutputBytes;
-    std::size_t maxPacketBytes;
+    std::size_t maxBufferBytes;
+    std::size_t maxStdoutBytes;
+    std::size_t maxStderrBytes;
     std::size_t maxResultBytes;
+    std::size_t maxPacketBytes;
 };
 
 struct Content {
@@ -116,16 +118,19 @@ auto Decode(std::string_view s, int n) -> int
     return c;
 }
 
-void Sanitize(std::string_view source, std::string& result)
+void Sanitize(std::string_view source, std::size_t cutoff, std::string& target)
 {
     auto buffer = std::string{};
-    auto escape = [&buffer, &result] -> void {
+    auto escape = [&buffer, &target] -> void {
         for (auto c : buffer) {
-            std::format_to(std::back_inserter(result), "\\x{:02X}", c);
+            std::format_to(std::back_inserter(target), "\\x{:02X}", c);
         }
         buffer.clear();
     };
     for (auto c : source) {
+        if (target.size() >= cutoff) [[unlikely]] {
+            return;
+        }
         if (std::countl_one<unsigned char>(c) != 1) {
             escape();
         }
@@ -136,7 +141,7 @@ void Sanitize(std::string_view source, std::string& result)
                 continue;
             }
             if (IsValid[i](Decode(buffer, i))) [[likely]] {
-                result.append(buffer);
+                target.append(buffer);
                 buffer.clear();
                 continue;
             }
@@ -146,10 +151,10 @@ void Sanitize(std::string_view source, std::string& result)
     escape();
 }
 
-void SanitizeFromStack(lua_State* state, int index, std::string& result)
+void Sanitize(lua_State* state, int index, std::size_t cutoff, std::string& target)
 {
     auto length = 0ZU;
-    Sanitize({luaL_tolstring(state, index, &length), length}, result);
+    Sanitize({luaL_tolstring(state, index, &length), length}, cutoff, target);
     lua_settop(state, -2);
 }
 
@@ -159,15 +164,15 @@ auto Print(lua_State* state) -> int
     auto cutoff = static_cast<std::size_t*>(lua_touserdata(state, lua_upvalueindex(2)));
     auto offset = buffer->size();
     if (!buffer->ends_with(OutputTruncated)) {
-        auto result = std::string{};
+        auto target = std::string{};
         for (auto i = 1, n = lua_gettop(state); i <= n; ++i) {
-            result.clear();
-            SanitizeFromStack(state, i, result);
-            if (buffer->size() + result.size() + OutputTruncated.size() + 1 >= *cutoff) {
+            target.clear();
+            Sanitize(state, i, *cutoff, target);
+            if (buffer->size() + target.size() + OutputTruncated.size() + 1 >= *cutoff) {
                 buffer->append(OutputTruncated);
                 break;
             }
-            buffer->append(result);
+            buffer->append(target);
             buffer->push_back('\t');
         }
         if (buffer->size() == offset) {
@@ -268,9 +273,10 @@ auto Execute(const Config& config, const std::string& script) -> std::tuple<std:
     auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(config.maxExecutionMs);
     using UniqueState = std::unique_ptr<lua_State, void (*)(lua_State*)>;
     if (auto state = UniqueState{lua_newstate(Allocate, &avail, luaL_makeseed(nullptr)), lua_close}) {
-        auto popError = [&content, &state] -> std::tuple<std::string, bool> {
+        auto popError = [&config, &content, &state] -> std::tuple<std::string, bool> {
             auto length = 0ZU;
-            content.output.append(lua_tolstring(state.get(), -1, &length), length);
+            auto cutoff = content.output.size() + config.maxStderrBytes - 1;
+            Sanitize({lua_tolstring(state.get(), -1, &length), length}, cutoff, content.output);
             content.output.push_back('\n');
             lua_settop(state.get(), -2);
             auto buffer = std::string{};
@@ -284,7 +290,7 @@ auto Execute(const Config& config, const std::string& script) -> std::tuple<std:
         }
         lua_newtable(state.get());
         RegisterCoreBindings(state.get());
-        RegisterHostBindings(state.get(), content.output, config.maxOutputBytes);
+        RegisterHostBindings(state.get(), content.output, config.maxStdoutBytes);
         lua_pushvalue(state.get(), -1);
         lua_setfield(state.get(), -2, "_G");
         lua_setupvalue(state.get(), -2, 1);
@@ -304,7 +310,7 @@ auto Execute(const Config& config, const std::string& script) -> std::tuple<std:
             return popError();
         }
         for (auto i = 1, n = lua_gettop(state.get()); i <= n; ++i) {
-            SanitizeFromStack(state.get(), i, content.result.emplace_back());
+            Sanitize(state.get(), i, config.maxResultBytes, content.result.emplace_back());
             if (quota < content.result.back().size()) {
                 content.output.append("result too large\n");
                 content.result.clear();
@@ -359,9 +365,11 @@ auto main(int argc, char** argv) -> int
     auto config = Config{
         .maxExecutionMs = 10000ZU,
         .maxMemoryBytes = 1ZU << 30,
-        .maxOutputBytes = 1ZU << 16,
-        .maxPacketBytes = 1ZU << 9,
+        .maxBufferBytes = 1ZU << 16,
+        .maxStdoutBytes = 1ZU << 16,
+        .maxStderrBytes = 1ZU << 12,
         .maxResultBytes = 1ZU << 12,
+        .maxPacketBytes = 1ZU << 9,
     };
     auto paths = std::vector<std::string_view>{};
     paths.reserve(argc);
