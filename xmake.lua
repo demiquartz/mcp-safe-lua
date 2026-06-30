@@ -16,7 +16,7 @@ add_requires("glaze 7.0.x", "lua 5.5.x")
 
 target(project)
     set_kind("binary")
-    add_files("src/main.cpp")
+    add_files("src/main.cpp", "src/stream.cpp")
     add_packages("glaze", "lua")
     set_configvar("project", project)
     set_configvar("version", version)
