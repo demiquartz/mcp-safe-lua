@@ -180,7 +180,6 @@ The server returns the execution logs in `output` and the return value in `resul
 ```
 
 ## 🗺️ Roadmap
-- [ ] Code refactoring and architectural improvements
 - [ ] Performance optimizations
 - [ ] Verify strict compliance with MCP specifications
 - [ ] Support for remote MCP connections

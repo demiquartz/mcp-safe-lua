@@ -5,13 +5,15 @@
  * @brief Provides the main entry point and dispatches JSON-RPC requests.
  */
 
-#include <iostream>
 #include <print>
 
 #include <glaze/ext/jsonrpc.hpp>
 #include <lua.hpp>
 
 #include "config.hpp"
+#include "stream.hpp"
+
+namespace SafeLua {
 
 constexpr glz::opts RequireAllKeys{.error_on_unknown_keys = false, .error_on_missing_keys = true};
 
@@ -265,6 +267,29 @@ auto Allocate(void* ud, void* ptr, std::size_t osize, std::size_t nsize) -> void
     return nptr;
 }
 
+auto Fetch(std::span<char> buffer, std::string_view& rest, std::string& line) -> bool
+{
+    line.clear();
+    while (true) {
+        auto pos = rest.find('\n');
+        line.append_range(rest.substr(0, std::min(pos, buffer.size() - line.size())));
+        if (pos != std::string_view::npos) {
+            rest.remove_prefix(pos + 1);
+            if (buffer.size() != line.size()) {
+                return true;
+            }
+            line.clear();
+        }
+        else {
+            rest = {buffer.data(), Stream::Read(buffer)};
+            if (rest.empty()) {
+                line.clear();
+                return false;
+            }
+        }
+    }
+}
+
 auto Execute(const Config& config, const std::string& script) -> std::tuple<std::string, bool>
 {
     auto content = Content{};
@@ -331,12 +356,15 @@ auto Execute(const Config& config, const std::string& script) -> std::tuple<std:
 
 void Serve(const Config& config, auto&& handler)
 {
-    auto request = std::string{};
-    while (std::getline(std::cin, request)) {
-        if (auto response = handler(request); !response.empty()) {
-            response.push_back('\n');
-            for (auto i = 0ZU, n = response.size(); i < n; i += config.maxPacketBytes) {
-                auto s = std::string_view(response).substr(i, config.maxPacketBytes);
+    auto buffer = std::vector<char>(std::max(config.maxBufferBytes, 1ZU));
+    auto rest = std::string_view{};
+    auto line = std::string{};
+    auto step = std::max(config.maxPacketBytes, 4ZU);
+    while (Fetch(buffer, rest, line)) {
+        if (auto result = handler(line); !result.empty()) {
+            result.push_back('\n');
+            for (auto i = 0ZU, n = result.size(); i < n; i += step) {
+                auto s = std::string_view(result).substr(i, step);
                 for (auto [j, c] : s | std::views::reverse | std::views::take(4) | std::views::enumerate) {
                     auto k = std::countl_one<unsigned char>(c);
                     if (k == 0) {
@@ -351,8 +379,7 @@ void Serve(const Config& config, auto&& handler)
                     }
                     break;
                 }
-                std::fwrite(s.data(), s.size(), 1, stdout);
-                std::fflush(stdout);
+                Stream::Write(s);
             }
         }
     }
@@ -360,9 +387,11 @@ void Serve(const Config& config, auto&& handler)
 
 } // namespace
 
+} // namespace SafeLua
+
 auto main(int argc, char** argv) -> int
 {
-    auto config = Config{
+    auto config = SafeLua::Config{
         .maxExecutionMs = 10000ZU,
         .maxMemoryBytes = 1ZU << 30,
         .maxBufferBytes = 1ZU << 16,
@@ -384,17 +413,17 @@ auto main(int argc, char** argv) -> int
     try {
         // clang-format off
         auto server = glz::rpc::server<
-            glz::rpc::method<"notifications/initialized", ParamsNotifications, ResultNotifications>,
-            glz::rpc::method<"initialize", ParamsInitialize, ResultInitialize>,
-            glz::rpc::method<"tools/list", ParamsToolsList, ResultToolsList>,
-            glz::rpc::method<"tools/call", ParamsToolsCall, ResultToolsCall>
+            glz::rpc::method<"notifications/initialized", SafeLua::ParamsNotifications, SafeLua::ResultNotifications>,
+            glz::rpc::method<"initialize"               , SafeLua::ParamsInitialize   , SafeLua::ResultInitialize   >,
+            glz::rpc::method<"tools/list"               , SafeLua::ParamsToolsList    , SafeLua::ResultToolsList    >,
+            glz::rpc::method<"tools/call"               , SafeLua::ParamsToolsCall    , SafeLua::ResultToolsCall    >
         >{};
         // clang-format on
-        server.on<"notifications/initialized">([](const auto&) -> auto { return ResultNotifications{}; });
+        server.on<"notifications/initialized">([](const auto&) -> auto { return SafeLua::ResultNotifications{}; });
         server.on<"initialize">([](const auto&) -> auto {
             // clang-format off
-            return ResultInitialize{
-                .protocolVersion = ProtocolVersion,
+            return SafeLua::ResultInitialize{
+                .protocolVersion = SafeLua::ProtocolVersion,
                 .capabilities = {
                     .tools = {
                         .listChanged = true,
@@ -409,7 +438,7 @@ auto main(int argc, char** argv) -> int
         });
         server.on<"tools/list">([](const auto&) -> auto {
             // clang-format off
-            return ResultToolsList{
+            return SafeLua::ResultToolsList{
                 .tools = {
                     {
                         .name = "execute_lua",
@@ -440,10 +469,10 @@ auto main(int argc, char** argv) -> int
             // clang-format on
         });
         server.on<"tools/call">([&config](const auto& params) -> auto {
-            auto result = ResultToolsCall{};
+            auto result = SafeLua::ResultToolsCall{};
             if (params.name == "execute_lua") {
                 using namespace std::chrono_literals;
-                auto results = Execute(config, params.arguments.script);
+                auto results = SafeLua::Execute(config, params.arguments.script);
                 result.content[0].type = "text";
                 result.content[0].text = std::get<0>(results);
                 result.isError = std::get<1>(results);
@@ -453,7 +482,7 @@ auto main(int argc, char** argv) -> int
             }
             return result;
         });
-        Serve(config, [&server](const auto& request) -> auto { return server.call(request); });
+        SafeLua::Serve(config, [&server](const auto& request) -> auto { return server.call(request); });
     }
     catch (const std::exception& e) {
         std::println(stderr, "{}", e.what());
