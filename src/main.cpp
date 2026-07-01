@@ -270,21 +270,24 @@ auto Allocate(void* ud, void* ptr, std::size_t osize, std::size_t nsize) -> void
 auto Fetch(std::span<char> buffer, std::string_view& rest, std::string& line) -> bool
 {
     line.clear();
-    do {
+    while (true) {
         auto pos = rest.find('\n');
         line.append_range(rest.substr(0, std::min(pos, buffer.size() - line.size())));
         if (pos != std::string_view::npos) {
             rest.remove_prefix(pos + 1);
-            if (buffer.size() == line.size()) {
-                line.clear();
-                continue;
+            if (buffer.size() != line.size()) {
+                return true;
             }
-            return true;
+            line.clear();
         }
-        rest = {buffer.data(), Stream::Read(buffer)};
-    } while (!rest.empty());
-    line.clear();
-    return false;
+        else {
+            rest = {buffer.data(), Stream::Read(buffer)};
+            if (rest.empty()) {
+                line.clear();
+                return false;
+            }
+        }
+    }
 }
 
 auto Execute(const Config& config, const std::string& script) -> std::tuple<std::string, bool>
